@@ -1,0 +1,10 @@
+{
+  "timestamp": "2025-08-12T10:29:43.529694",
+  "contributors": {
+    "Skrub": "Error 401 for skrub-data/skrub: {\"message\":\"Bad credentials\",\"documentation_url\":\"https://docs.github.com/rest\",\"status\":\"401\"}",
+    "tslearn": "Error 401 for tslearn-team/tslearn: {\"message\":\"Bad credentials\",\"documentation_url\":\"https://docs.github.com/rest\",\"status\":\"401\"}",
+    "scikit-learn": "Error 401 for scikit-learn/scikit-learn: {\"message\":\"Bad credentials\",\"documentation_url\":\"https://docs.github.com/rest\",\"status\":\"401\"}",
+    "Aeon": "Error 401 for aeon-toolkit/aeon: {\"message\":\"Bad credentials\",\"documentation_url\":\"https://docs.github.com/rest\",\"status\":\"401\"}",
+    "Mapie": "Error 401 for scikit-learn-contrib/MAPIE: {\"message\":\"Bad credentials\",\"documentation_url\":\"https://docs.github.com/rest\",\"status\":\"401\"}"
+  }
+}
