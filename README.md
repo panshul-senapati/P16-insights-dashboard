@@ -18,7 +18,7 @@ An interactive dashboard to analyze and visualize GitHub repository insights —
 
 - **Python** — Data processing and API integration.
 - **Streamlit** — Interactive and responsive UI.
-- **GitHub REST API** — Repository data source.
+- **GitHub GraphQL and REST API** — Repository data source.
 - **Pandas** — Data wrangling and transformations.
 - **Matplotlib / Plotly** — Visualizations.
 
