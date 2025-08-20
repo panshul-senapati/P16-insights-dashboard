@@ -1,4 +1,22 @@
+# Core dependencies
 streamlit>=1.28.0
 pandas>=2.0.0
-plotly>=5.15.0
+numpy>=1.24.0
 requests>=2.31.0
+
+# Visualization
+plotly>=5.15.0
+
+# Data processing
+python-dateutil>=2.8.0
+
+# Optional: For enhanced GitHub API access
+PyGithub>=1.59.0
+
+# Optional: For PyPI statistics
+pypistats>=1.4.0
+
+# Development dependencies (optional)
+pytest>=7.4.0
+black>=23.7.0
+flake8>=6.0.0

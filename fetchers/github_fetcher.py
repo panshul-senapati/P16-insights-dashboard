@@ -1,189 +1,158 @@
+"""
+Fetchers - Responsible for fetching data from GitHub API
+and saving it to the data folder for loaders to access.
+"""
+
 import os
 import time
-import json
-import base64
-import subprocess
+import logging
 import requests
 import pandas as pd
-import streamlit as st
-from dotenv import load_dotenv
+from datetime import datetime
+from typing import Optional, Dict
 
-# Load environment variables
-load_dotenv()
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-class GitHubFetcher:
-    """Handles all GitHub API data fetching operations with authentication & retries."""
 
-    def __init__(self):
-        self.github_token = os.getenv("GITHUB_TOKEN", None)
-        self.headers = {
-            "Authorization": f"token {self.github_token}",
-            "Accept": "application/vnd.github.v3+json"
-        } if self.github_token else {
-            "Accept": "application/vnd.github.v3+json"
+class BaseFetcher:
+    """Base class for all fetchers."""
+
+    def __init__(self, data_dir: str):
+        self.data_dir = data_dir
+        os.makedirs(data_dir, exist_ok=True)
+
+    def _get_github_headers(self) -> Dict[str, str]:
+        headers = {
+            "Accept": "application/vnd.github.v3+json",
+            "User-Agent": "GitHub-Analytics-Dashboard",
         }
-        self.base_url = "https://api.github.com"
+        token = os.getenv("GITHUB_TOKEN")
+        if token:
+            headers["Authorization"] = f"token {token}"
+        return headers
 
-    def _request(self, url, max_retries=3, sleep_time=2):
-        """Make an authenticated GET request with retries."""
-        for attempt in range(max_retries):
-            response = requests.get(url, headers=self.headers)
-            
-            # Rate limit hit
-            if response.status_code == 403 and "X-RateLimit-Remaining" in response.headers:
-                reset_time = int(response.headers.get("X-RateLimit-Reset", time.time() + 60))
-                wait_for = int(reset_time - time.time()) + 1
-                st.warning(f"⏳ Rate limit hit. Waiting {wait_for} seconds...")
-                time.sleep(wait_for)
-                continue
-            
-            # Data not ready yet (for stats endpoints)
-            if response.status_code == 202:
-                time.sleep(sleep_time)
-                continue
-            
-            return response
-        
-        return response
+    def _make_request(self, url: str, params: Optional[Dict] = None) -> Optional[requests.Response]:
+        try:
+            headers = self._get_github_headers()
+            response = requests.get(url, headers=headers, params=params, timeout=30)
 
-    def get_release_downloads(self, owner, repo):
-        """Fetch GitHub release download statistics."""
-        url = f"{self.base_url}/repos/{owner}/{repo}/releases"
-        response = self._request(url)
-        
-        if response.status_code != 200:
-            st.warning(f"Failed to fetch releases: Status {response.status_code}")
-            return pd.DataFrame()
-        
-        releases = response.json()
-        downloads_data = []
-        
-        for release in releases:
-            tag = release.get("tag_name", "N/A")
-            for asset in release.get("assets", []):
-                downloads_data.append({
-                    "Release": tag,
-                    "Asset": asset.get("name", "unknown"),
-                    "Downloads": asset.get("download_count", 0),
-                    "Uploaded": asset.get("created_at", "")[:10]
-                })
-        
-        return pd.DataFrame(downloads_data)
+            # Rate limit handling
+            if response.status_code == 403 and "rate limit" in response.text.lower():
+                logger.warning("Rate limit exceeded. Waiting 60 seconds...")
+                time.sleep(60)
+                response = requests.get(url, headers=headers, params=params, timeout=30)
 
-    def get_weekly_contributions(self, owner, repo):
-        """Fetch weekly contribution statistics from GitHub."""
-        url = f"{self.base_url}/repos/{owner}/{repo}/stats/commit_activity"
-        
-        # This endpoint can return 202 until GitHub generates the stats
-        for _ in range(10):
-            response = self._request(url)
-            if response.status_code == 202:
-                time.sleep(3)
-                continue
-            elif response.status_code == 200:
-                break
+            if response.status_code == 200:
+                return response
             else:
-                st.warning(f"Failed to fetch contributions: Status {response.status_code}")
-                return pd.DataFrame()
-        
-        data = response.json()
-        if not data:
+                logger.error(f"HTTP {response.status_code}: {response.text}")
+                return None
+
+        except requests.RequestException as e:
+            logger.error(f"Request failed: {e}")
+            return None
+
+
+# --------------------------- Fetchers ---------------------------
+class StarsFetcher(BaseFetcher):
+    """Fetch stars over time."""
+
+    def fetch(self, owner: str, repo: str) -> pd.DataFrame:
+        url = f"https://api.github.com/repos/{owner}/{repo}/stargazers"
+        headers = self._get_github_headers()
+        headers["Accept"] = "application/vnd.github.v3.star+json"  # To get starred_at
+        response = requests.get(url, headers=headers, params={"per_page": 100})
+        if not response or response.status_code != 200:
             return pd.DataFrame()
-        
-        df = pd.DataFrame([{
-            "week": pd.to_datetime(item["week"], unit="s"),
-            "commits": item["total"]
-        } for item in data])
-        
+
+        data = response.json()
+        # Build DataFrame with date and count
+        df = pd.DataFrame([{"date": star.get("starred_at", datetime.utcnow()), "count": 1} for star in data])
+        if not df.empty:
+            df["date"] = pd.to_datetime(df["date"])
+            df = df.groupby("date").count().reset_index()
+            df.to_csv(os.path.join(self.data_dir, f"{repo}_stars.csv"), index=False)
+            logger.info(f"Saved stars data → {self.data_dir}/{repo}_stars.csv")
         return df
 
-    def get_issues_over_time(self, owner, repo):
-        """Fetch issues creation data over time."""
-        issues = []
-        page = 1
-        
-        while True:
-            url = f"{self.base_url}/repos/{owner}/{repo}/issues?state=all&per_page=100&page={page}"
-            response = self._request(url)
-            
-            if response.status_code != 200:
-                st.warning(f"Issues API failed with status {response.status_code}")
-                break
-            
-            page_data = response.json()
-            if not page_data:
-                break
-            
-            for issue in page_data:
-                if "pull_request" not in issue:
-                    issues.append({"created_at": issue.get("created_at", "")})
-            
-            page += 1
-            if page > 10:
-                break
-        
-        if not issues:
-            return pd.DataFrame()
-        
-        df = pd.DataFrame(issues)
-        df["date"] = pd.to_datetime(df["created_at"]).dt.tz_localize(None).dt.normalize()
-        return df.groupby("date").size().reset_index(name="issue_count")
 
-    def get_dependencies(self, owner, repo):
-        """Fetch repository dependencies from manifest files."""
-        possible_files = ["requirements.txt", "environment.yml", "package.json"]
-        dependencies = []
+class ForksFetcher(BaseFetcher):
+    """Fetch forks over time."""
 
-        for file in possible_files:
-            url = f"{self.base_url}/repos/{owner}/{repo}/contents/{file}"
-            res = self._request(url)
-            
-            if res.status_code == 200:
-                content_data = res.json()
-                if content_data.get("encoding") == "base64":
-                    decoded = base64.b64decode(content_data["content"]).decode("utf-8")
-                    
-                    if file == "package.json":
-                        try:
-                            package_json = json.loads(decoded)
-                            deps = package_json.get("dependencies", {})
-                            dependencies = [{"Dependency": k, "Version": v} for k, v in deps.items()]
-                        except json.JSONDecodeError:
-                            st.warning("Invalid package.json format.")
-                    else:
-                        for line in decoded.splitlines():
-                            if line.strip() and not line.startswith("#"):
-                                if "==" in line:
-                                    pkg, ver = line.split("==", 1)
-                                    dependencies.append({"Dependency": pkg.strip(), "Version": ver.strip()})
-                                else:
-                                    dependencies.append({"Dependency": line.strip(), "Version": "N/A"})
-                    break
-        
-        return pd.DataFrame(dependencies)
+    def fetch(self, owner: str, repo: str) -> pd.DataFrame:
+        url = f"https://api.github.com/repos/{owner}/{repo}/forks"
+        response = self._make_request(url, params={"per_page": 100})
+        if not response:
+            return pd.DataFrame()
+        data = response.json()
+        df = pd.DataFrame([{"date": fork.get("created_at", datetime.utcnow()), "count": 1} for fork in data])
+        if not df.empty:
+            df["date"] = pd.to_datetime(df["date"])
+            df = df.groupby("date").count().reset_index()
+            df.to_csv(os.path.join(self.data_dir, f"{repo}_forks.csv"), index=False)
+            logger.info(f"Saved forks data → {self.data_dir}/{repo}_forks.csv")
+        return df
 
-    def get_dependents(self, owner, repo):
-        """Fetch public GitHub dependents using github-dependents-info tool."""
-        try:
-            full_repo = f"{owner}/{repo}"
-            result = subprocess.run(
-                ["github-dependents-info", "--repo", full_repo, "--json"],
-                capture_output=True,
-                text=True,
-                check=True
-            )
-            
-            output_data = json.loads(result.stdout)
-            dependents = output_data.get("all_public_dependent_repos", [])
-            
-            if dependents:
-                return pd.DataFrame(dependents)[["name", "stars"]]
-            else:
-                return pd.DataFrame()
-                
-        except subprocess.CalledProcessError:
-            st.error("❌ Failed to run `github-dependents-info`. Is it installed?")
+
+class PRsFetcher(BaseFetcher):
+    """Fetch pull requests over time."""
+
+    def fetch(self, owner: str, repo: str) -> pd.DataFrame:
+        url = f"https://api.github.com/repos/{owner}/{repo}/pulls"
+        response = self._make_request(url, params={"state": "all", "per_page": 100})
+        if not response:
             return pd.DataFrame()
-        except json.JSONDecodeError:
-            st.error("❌ Failed to parse JSON output from `github-dependents-info`.")
+        data = response.json()
+        df = pd.DataFrame([{"date": pr.get("created_at", datetime.utcnow()), "count": 1} for pr in data])
+        if not df.empty:
+            df["date"] = pd.to_datetime(df["date"])
+            df = df.groupby("date").count().reset_index()
+            df.to_csv(os.path.join(self.data_dir, f"{repo}_prs.csv"), index=False)
+            logger.info(f"Saved PRs data → {self.data_dir}/{repo}_prs.csv")
+        return df
+
+
+class DownloadsFetcher(BaseFetcher):
+    """Fetch release download counts."""
+
+    def fetch(self, owner: str, repo: str) -> pd.DataFrame:
+        url = f"https://api.github.com/repos/{owner}/{repo}/releases"
+        response = self._make_request(url, params={"per_page": 100})
+        if not response:
             return pd.DataFrame()
+        data = response.json()
+        rows = []
+        for release in data:
+            date = release.get("published_at", datetime.utcnow())
+            assets = release.get("assets", [])
+            count = sum(asset.get("download_count", 0) for asset in assets)
+            rows.append({"date": date, "count": count})
+        df = pd.DataFrame(rows)
+        if not df.empty:
+            df["date"] = pd.to_datetime(df["date"])
+            df.to_csv(os.path.join(self.data_dir, f"{repo}_downloads.csv"), index=False)
+            logger.info(f"Saved downloads data → {self.data_dir}/{repo}_downloads.csv")
+        return df
+
+
+# --------------------------- GitHubFetcher Wrapper ---------------------------
+class GitHubFetcher:
+    """Wrapper to fetch all GitHub repo data as a dict of DataFrames."""
+
+    def __init__(self, data_dir: str = "data"):
+        self.data_dir = data_dir
+        self.stars_fetcher = StarsFetcher(data_dir)
+        self.forks_fetcher = ForksFetcher(data_dir)
+        self.prs_fetcher = PRsFetcher(data_dir)
+        self.downloads_fetcher = DownloadsFetcher(data_dir)
+
+    def fetch_all(self, owner: str, repo: str) -> Dict[str, pd.DataFrame]:
+        """Fetch all metrics and return as dict of DataFrames."""
+        data = {}
+        data["stars"] = self.stars_fetcher.fetch(owner, repo)
+        data["forks"] = self.forks_fetcher.fetch(owner, repo)
+        data["prs"] = self.prs_fetcher.fetch(owner, repo)
+        data["downloads"] = self.downloads_fetcher.fetch(owner, repo)
+        return data

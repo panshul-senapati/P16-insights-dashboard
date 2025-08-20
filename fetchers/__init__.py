@@ -1,2 +1,8 @@
-from .github_fetcher import GitHubFetcher
-__all__ = ['GitHubFetcher']
+# fetchers/__init__.py
+
+from .github_fetcher import GitHubFetcher, StarsFetcher
+
+__all__ = [
+    "GitHubFetcher",
+    "StarsFetcher",
+]

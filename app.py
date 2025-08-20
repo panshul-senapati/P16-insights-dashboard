@@ -3,13 +3,27 @@ GitHub Insights Dashboard - Streamlit App
 Uses DataManager for clean separation of data fetching and loading logic
 """
 
+# ----------------------------
+# ENVIRONMENT SETUP
+# ----------------------------
+from dotenv import load_dotenv
+import os
+
+# Load environment variables from .env
+load_dotenv()
+token = os.getenv("GITHUB_TOKEN")
+if not token:
+    raise ValueError("⚠️ GitHub token not found in .env! Please add GITHUB_TOKEN=<your_token>")
+
+# ----------------------------
+# IMPORTS
+# ----------------------------
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 from datetime import date, timedelta
 
 from data_manager import DataManager
-
 
 # ----------------------------
 # PAGE CONFIGURATION
@@ -101,11 +115,25 @@ def ensure_datetime_column(df: pd.DataFrame, date_col: str = "date") -> pd.DataF
     return df
 
 def filter_by_date_range(df: pd.DataFrame, start_date: date, end_date: date, date_col: str = "date") -> pd.DataFrame:
-    """Filter DataFrame by date range."""
-    from_date = pd.to_datetime(start_date)
-    to_date = pd.to_datetime(end_date)
+    """Filter DataFrame by date range (handles timezone-aware datetimes)."""
+    if df.empty or date_col not in df.columns:
+        return pd.DataFrame()
     
-    return df[(df[date_col] >= from_date) & (df[date_col] <= to_date)]
+    df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+    
+    # Convert start/end to match column type
+    if pd.api.types.is_datetime64_any_dtype(df[date_col]):
+        if df[date_col].dt.tz is not None:
+            start_ts = pd.Timestamp(start_date).tz_localize("UTC")
+            end_ts = pd.Timestamp(end_date).tz_localize("UTC")
+        else:
+            start_ts = pd.Timestamp(start_date)
+            end_ts = pd.Timestamp(end_date)
+    else:
+        start_ts = pd.Timestamp(start_date)
+        end_ts = pd.Timestamp(end_date)
+    
+    return df[(df[date_col] >= start_ts) & (df[date_col] <= end_ts)]
 
 # ----------------------------
 # MAIN DATA LOADING
@@ -137,6 +165,8 @@ filtered_data = {}
 for key, df in cached_data.items():
     if not df.empty:
         filtered_data[key] = filter_by_date_range(df, start_date, end_date)
+    else:
+        filtered_data[key] = pd.DataFrame()
 
 # ----------------------------
 # SUMMARY METRICS
@@ -168,12 +198,10 @@ with col4:
 st.markdown("---")
 st.subheader("📈 Trends Over Time")
 
-# Chart creation function
 def create_line_chart(df, x_col, y_col, title, color, y_label=None):
     """Create a standardized line chart."""
     if df.empty:
         return None
-    
     fig = px.line(
         df,
         x=x_col,
@@ -184,47 +212,28 @@ def create_line_chart(df, x_col, y_col, title, color, y_label=None):
         color_discrete_sequence=[color],
         labels={y_col: y_label or y_col.replace('_', ' ').title()}
     )
-    fig.update_layout(
-        xaxis_title="Date",
-        hovermode='x unified'
-    )
+    fig.update_layout(xaxis_title="Date", hovermode='x unified')
     return fig
 
-# Row 1: Stars and Forks
+# Stars and Forks
 col1, col2 = st.columns(2)
-
 with col1:
-    fig_stars = create_line_chart(
-        filtered_data["stars"], "date", "stars", 
-        "⭐ Stars Over Time", "#FFD700", "Stars"
-    )
+    fig_stars = create_line_chart(filtered_data["stars"], "date", "stars", "⭐ Stars Over Time", "#FFD700", "Stars")
     if fig_stars:
         st.plotly_chart(fig_stars, use_container_width=True)
-
 with col2:
-    fig_forks = create_line_chart(
-        filtered_data["forks"], "date", "forks", 
-        "🍴 Forks Over Time", "#1f77b4", "Forks"
-    )
+    fig_forks = create_line_chart(filtered_data["forks"], "date", "forks", "🍴 Forks Over Time", "#1f77b4", "Forks")
     if fig_forks:
         st.plotly_chart(fig_forks, use_container_width=True)
 
-# Row 2: PRs and Downloads
+# PRs and Downloads
 col3, col4 = st.columns(2)
-
 with col3:
-    fig_prs = create_line_chart(
-        filtered_data["prs"], "date", "pr_count", 
-        "🔄 Pull Requests Over Time", "#FF7F0E", "Pull Requests"
-    )
+    fig_prs = create_line_chart(filtered_data["prs"], "date", "pr_count", "🔄 Pull Requests Over Time", "#FF7F0E", "Pull Requests")
     if fig_prs:
         st.plotly_chart(fig_prs, use_container_width=True)
-
 with col4:
-    fig_downloads = create_line_chart(
-        filtered_data["downloads"], "date", "downloads", 
-        "⬇️ Downloads Over Time", "#9467bd", "Downloads"
-    )
+    fig_downloads = create_line_chart(filtered_data["downloads"], "date", "downloads", "⬇️ Downloads Over Time", "#9467bd", "Downloads")
     if fig_downloads:
         st.plotly_chart(fig_downloads, use_container_width=True)
 
@@ -234,17 +243,13 @@ with col4:
 st.markdown("---")
 st.subheader("🔄 Real-time Activity")
 
-# Contributions Chart
+# Contributions
 contributions_df = real_time_data.get('contributions', pd.DataFrame())
 if not contributions_df.empty:
     contributions_df = ensure_datetime_column(contributions_df, "week")
     filtered_contributions = filter_by_date_range(contributions_df, start_date, end_date, "week")
-    
     if not filtered_contributions.empty:
-        contrib_fig = create_line_chart(
-            filtered_contributions, "week", "commits",
-            "💻 Weekly Contributions (Commits)", "#2ca02c", "Commits"
-        )
+        contrib_fig = create_line_chart(filtered_contributions, "week", "commits", "💻 Weekly Contributions (Commits)", "#2ca02c", "Commits")
         if contrib_fig:
             st.plotly_chart(contrib_fig, use_container_width=True)
     else:
@@ -252,17 +257,13 @@ if not contributions_df.empty:
 else:
     st.info("ℹ️ No contribution data available.")
 
-# Issues Chart
+# Issues
 issues_df = real_time_data.get('issues', pd.DataFrame())
 if not issues_df.empty:
     issues_df = ensure_datetime_column(issues_df)
     filtered_issues = filter_by_date_range(issues_df, start_date, end_date)
-    
     if not filtered_issues.empty:
-        issues_fig = create_line_chart(
-            filtered_issues, "date", "issue_count",
-            "🐛 Issues Over Time", "#d62728", "Issues"
-        )
+        issues_fig = create_line_chart(filtered_issues, "date", "issue_count", "🐛 Issues Over Time", "#d62728", "Issues")
         if issues_fig:
             st.plotly_chart(issues_fig, use_container_width=True)
     else:
@@ -277,36 +278,17 @@ st.markdown("---")
 st.subheader("🔗 Public GitHub Dependents")
 
 dependents_df = real_time_data.get('dependents', pd.DataFrame())
-
 if not dependents_df.empty:
-    # Sort by stars
     df_sorted = dependents_df.sort_values(by="stars", ascending=False)
-    
-    # Create star range categories
     star_ranges = {
         "Below 100 stars": (df_sorted["stars"] < 100).sum(),
         "100 to 1000 stars": ((df_sorted["stars"] >= 100) & (df_sorted["stars"] <= 1000)).sum(),
         "1000+ stars": (df_sorted["stars"] > 1000).sum(),
     }
-    
-    # Display dependents table
     st.dataframe(df_sorted, use_container_width=True)
-    
-    # Create bar chart for star ranges
     if any(star_ranges.values()):
-        star_range_df = pd.DataFrame(
-            list(star_ranges.items()), 
-            columns=["Star Range", "Library Count"]
-        )
-        
-        fig_dep = px.bar(
-            star_range_df,
-            x="Star Range",
-            y="Library Count",
-            title="📊 Dependents by Star Range",
-            template="plotly_white",
-            color_discrete_sequence=["#17becf"]
-        )
+        star_range_df = pd.DataFrame(list(star_ranges.items()), columns=["Star Range", "Library Count"])
+        fig_dep = px.bar(star_range_df, x="Star Range", y="Library Count", title="📊 Dependents by Star Range", template="plotly_white", color_discrete_sequence=["#17becf"])
         st.plotly_chart(fig_dep, use_container_width=True)
 else:
     st.info("ℹ️ No public dependents found.")
@@ -328,12 +310,7 @@ download_data = [
 for i, (button_text, filename, df) in enumerate(download_data):
     with download_cols[i]:
         if not df.empty:
-            st.download_button(
-                button_text,
-                df.to_csv(index=False),
-                file_name=filename,
-                mime="text/csv"
-            )
+            st.download_button(button_text, df.to_csv(index=False), file_name=filename, mime="text/csv")
         else:
             st.button(button_text, disabled=True)
 
@@ -349,8 +326,3 @@ st.caption(f"Last updated: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')} | 
 hide_st_style = """
     <style>
     #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
-    </style>
-"""
-st.markdown(hide_st_style, unsafe_allow_html=True)
