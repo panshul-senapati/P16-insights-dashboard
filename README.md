@@ -46,11 +46,11 @@ github-insights-dashboard/
    python3 -m venv venv
 source venv/bin/activate   # On Windows: venv\Scripts\activate
 
-	Install dependencies
-`pip install -r requirements.txt`
+#Install dependencies
+pip install -r requirements.txt
 
- Run the dashboard
-`streamlit run app.py`
+#Run the dashboard
+streamlit run app.py
 
 
 
