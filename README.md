@@ -42,16 +42,17 @@ github-insights-dashboard/
    ```bash
    git clone https://github.com/panshul-senapati/P16-insights-dashboard.git
    cd P16-insights-dashboard
-   Create a virtual environment
+
+   #Create a virtual environment
    python3 -m venv venv
-source venv/bin/activate   # On Windows: venv\Scripts\activate
+   source venv/bin/activate   # On Windows: venv\Scripts\activate
 
-#Install dependencies
-pip install -r requirements.txt
+   #Install dependencies
+   pip install -r requirements.txt
 
-#Run the dashboard
-streamlit run app.py
-
+   #Run the dashboard
+   streamlit run app.py
+   ```
 
 
 
