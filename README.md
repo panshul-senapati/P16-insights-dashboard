@@ -47,10 +47,10 @@ github-insights-dashboard/
 source venv/bin/activate   # On Windows: venv\Scripts\activate
 
 	Install dependencies
- pip install -r requirements.txt
+`pip install -r requirements.txt`
 
  Run the dashboard
-streamlit run app.py
+`streamlit run app.py`
 
 
 
