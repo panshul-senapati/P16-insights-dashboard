@@ -1,11 +1,29 @@
+"""
+GitHub Insights Dashboard - Streamlit App
+Uses DataManager for clean separation of data fetching and loading logic
+"""
+
+# ----------------------------
+# ENVIRONMENT SETUP
+# ----------------------------
+from dotenv import load_dotenv
+import os
+
+# Load environment variables from .env
+load_dotenv()
+token = os.getenv("GITHUB_TOKEN")
+if not token:
+    raise ValueError("⚠️ GitHub token not found in .env! Please add GITHUB_TOKEN=<your_token>")
+
+# ----------------------------
+# IMPORTS
+# ----------------------------
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from datetime import date, timedelta, datetime
-import os
+from datetime import date, timedelta
 
-from loaders.data_loader import DataLoader
-from fetchers.github_fetcher import GitHubFetcher
+from data_manager import DataManager
 
 # ----------------------------
 # PAGE CONFIGURATION
@@ -14,11 +32,12 @@ st.set_page_config(page_title="📊 GitHub Insights Dashboard", layout="wide")
 st.title("📊 GitHub Insights Dashboard")
 
 # ----------------------------
-# SIDEBAR
+# SIDEBAR CONFIGURATION
 # ----------------------------
 st.sidebar.header("📁 Library Info & Filter")
 
-repo_map = {
+# Repository mapping
+REPO_MAP = {
     "Skrub": ("skrub-data", "skrub"),
     "tslearn": ("tslearn-team", "tslearn"),
     "scikit-learn": ("scikit-learn", "scikit-learn"),
@@ -26,269 +45,284 @@ repo_map = {
     "Mapie": ("scikit-learn-contrib", "mapie"),
 }
 
-selected_lib = st.sidebar.selectbox(" Select Library:", list(repo_map.keys()))
-owner, repo = repo_map[selected_lib]
+# Library selection
+selected_lib = st.sidebar.selectbox("🔍 Select Library:", list(REPO_MAP.keys()))
+owner, repo = REPO_MAP[selected_lib]
 
+# Date range selection
 today = date.today()
 default_start = today - timedelta(days=180)
 
 start_date = st.sidebar.date_input(
-    " Select Start Date:", default_start, min_value=date(2010, 1, 1), max_value=today
+    "📅 Select Start Date:", 
+    default_start, 
+    min_value=date(2010, 1, 1), 
+    max_value=today
 )
 end_date = st.sidebar.date_input(
-    " Select End Date:", today, min_value=start_date, max_value=today
+    "📅 Select End Date:", 
+    today, 
+    min_value=start_date, 
+    max_value=today
 )
 
-# ----------------------------
-# INITIALIZE LOADERS AND FETCHERS
-# ----------------------------
-data_loader = DataLoader()
-github_fetcher = GitHubFetcher()
+# Data refresh options
+st.sidebar.markdown("---")
+st.sidebar.subheader("🔄 Data Management")
+
+force_refresh = st.sidebar.button("🔄 Force Refresh All Data")
+if st.sidebar.button("📊 Show Data Status"):
+    st.session_state.show_status = True
 
 # ----------------------------
-# CSV PATHS & REFRESH SETTINGS
+# INITIALIZE DATA MANAGER
 # ----------------------------
-DATA_DIR = "data"
-if not os.path.exists(DATA_DIR):
-    os.makedirs(DATA_DIR)
+@st.cache_resource
+def get_data_manager():
+    """Initialize and cache the data manager."""
+    return DataManager(data_dir="data", refresh_threshold_hours=24)
 
-CSV_FILES = {
-    "stars": os.path.join(DATA_DIR, "stars.csv"),
-    "forks": os.path.join(DATA_DIR, "forks.csv"),
-    "prs": os.path.join(DATA_DIR, "prs.csv"),
-    "downloads": os.path.join(DATA_DIR, "github_downloads.csv"),
-}
+data_manager = get_data_manager()
 
-REFRESH_THRESHOLD_HOURS = 24
+# ----------------------------
+# DATA STATUS DISPLAY (Optional)
+# ----------------------------
+if st.session_state.get('show_status', False):
+    st.sidebar.markdown("### 📋 Data Status")
+    status = data_manager.get_data_status()
+    
+    for data_type, info in status.items():
+        status_icon = "🟢" if not info['is_stale'] else "🔴" if not info['exists'] else "🟡"
+        st.sidebar.text(f"{status_icon} {data_type.title()}: {info['last_updated']}")
 
-def csv_needs_refresh(filepath):
-    if not os.path.exists(filepath):
-        return True
-    mod_time = datetime.fromtimestamp(os.path.getmtime(filepath))
-    return (datetime.now() - mod_time).total_seconds() > REFRESH_THRESHOLD_HOURS * 3600
+# ----------------------------
+# UTILITY FUNCTIONS
+# ----------------------------
+@st.cache_data(ttl=3600)  # Cache for 1 hour
+def load_cached_data(owner: str, repo: str, force_refresh: bool = False):
+    """Load all cached data through data manager."""
+    return data_manager.get_all_cached_data(owner, repo, force_refresh)
 
-def fetch_and_save_csv(kind):
-    # kind in ["stars", "forks", "prs", "downloads"]
-    fetch_map = {
-        "stars": github_fetcher.get_stars_over_time,
-        "forks": github_fetcher.get_forks_over_time,
-        "prs": github_fetcher.get_pull_requests_over_time,
-        "downloads": github_fetcher.get_downloads_over_time,
-    }
-    fetch_func = fetch_map.get(kind)
-    if fetch_func:
-        df = fetch_func(owner, repo)
-        if not df.empty:
-            df.to_csv(CSV_FILES[kind], index=False)
-        return df
-    return pd.DataFrame()
+@st.cache_data(ttl=1800)  # Cache for 30 minutes
+def load_real_time_data(owner: str, repo: str):
+    """Load real-time data through data manager."""
+    return data_manager.get_real_time_data(owner, repo)
 
-def load_or_refresh_csv(kind):
-    path = CSV_FILES[kind]
-    if csv_needs_refresh(path):
-        df = fetch_and_save_csv(kind)
-        if df.empty and os.path.exists(path):
-            return pd.read_csv(path)
-        return df
-    else:
-        return pd.read_csv(path)
-
-# Load data with refresh logic
-stars_df = load_or_refresh_csv("stars")
-forks_df = load_or_refresh_csv("forks")
-prs_df = load_or_refresh_csv("prs")
-downloads_df = load_or_refresh_csv("downloads")
-
-def ensure_datetime(df, date_col="date"):
+def ensure_datetime_column(df: pd.DataFrame, date_col: str = "date") -> pd.DataFrame:
+    """Ensure date column is datetime type."""
     if date_col in df.columns:
         df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
     return df
 
-stars_df = ensure_datetime(stars_df)
-forks_df = ensure_datetime(forks_df)
-prs_df = ensure_datetime(prs_df)
-downloads_df = ensure_datetime(downloads_df)
-
-# Dynamic fetch for contributions and issues (no CSV caching)
-contributions_df = github_fetcher.get_weekly_contributions(owner, repo)
-issues_df = github_fetcher.get_issues_over_time(owner, repo)
+def filter_by_date_range(df: pd.DataFrame, start_date: date, end_date: date, date_col: str = "date") -> pd.DataFrame:
+    """Filter DataFrame by date range (handles timezone-aware datetimes)."""
+    if df.empty or date_col not in df.columns:
+        return pd.DataFrame()
+    
+    df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+    
+    # Convert start/end to match column type
+    if pd.api.types.is_datetime64_any_dtype(df[date_col]):
+        if df[date_col].dt.tz is not None:
+            start_ts = pd.Timestamp(start_date).tz_localize("UTC")
+            end_ts = pd.Timestamp(end_date).tz_localize("UTC")
+        else:
+            start_ts = pd.Timestamp(start_date)
+            end_ts = pd.Timestamp(end_date)
+    else:
+        start_ts = pd.Timestamp(start_date)
+        end_ts = pd.Timestamp(end_date)
+    
+    return df[(df[date_col] >= start_ts) & (df[date_col] <= end_ts)]
 
 # ----------------------------
-# FILTERING AND DISPLAY
+# MAIN DATA LOADING
 # ----------------------------
-if all([not df.empty for df in [stars_df, forks_df, prs_df, downloads_df]]):
-    from_date = pd.to_datetime(start_date)
-    to_date = pd.to_datetime(end_date)
+with st.spinner("Loading data..."):
+    # Load cached data (stars, forks, PRs, downloads)
+    cached_data = load_cached_data(owner, repo, force_refresh)
+    
+    # Ensure datetime columns
+    for key, df in cached_data.items():
+        cached_data[key] = ensure_datetime_column(df)
+    
+    # Load real-time data (contributions, issues, dependents)
+    real_time_data = load_real_time_data(owner, repo)
 
-    def filter_df(df, date_col="date"):
-        return df[(df[date_col] >= from_date) & (df[date_col] <= to_date)]
 
-    filtered_stars = filter_df(stars_df)
-    filtered_forks = filter_df(forks_df)
-    filtered_prs = filter_df(prs_df)
-    filtered_downloads = filter_df(downloads_df)
+# ----------------------------
+# DATA VALIDATION AND FILTERING
+# ----------------------------
+required_data = ['stars', 'forks', 'prs', 'downloads']
+missing_data = [key for key in required_data if cached_data[key].empty]
 
-    # Summary Metrics
-    st.subheader(f"📊 Summary for {owner}/{repo}")
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Total Stars", int(filtered_stars["stars"].sum()))
-    col2.metric("Total Forks", int(filtered_forks["forks"].sum()))
-    col3.metric("Total PRs", int(filtered_prs["pr_count"].sum()))
-    col4.metric("Total Downloads", int(filtered_downloads["downloads"].sum()))
+if missing_data:
+    st.error(f"❌ Missing or invalid data for: {', '.join(missing_data)}")
+    st.info("💡 Try clicking 'Force Refresh All Data' to fetch new data.")
+    st.stop()
 
-    # Charts Row 1
-    col1, col2 = st.columns(2)
-    with col1:
-        fig_stars = px.line(
-            filtered_stars,
-            x="date",
-            y="stars",
-            title=" Stars Over Time",
-            markers=True,
-            template="plotly_white",
-            color_discrete_sequence=["#FFD700"],
-        )
+
+# Filter data by date range
+filtered_data = {}
+for key, df in cached_data.items():
+    if not df.empty:
+        filtered_data[key] = filter_by_date_range(df, start_date, end_date)
+    else:
+        filtered_data[key] = pd.DataFrame()
+
+
+# ----------------------------
+# SUMMARY METRICS
+# ----------------------------
+st.subheader(f"📊 Summary for {owner}/{repo}")
+st.caption(f"Data from {start_date} to {end_date}")
+
+col1, col2, col3, col4 = st.columns(4)
+
+with col1:
+    total_stars = int(filtered_data["stars"]["count"].sum()) if not filtered_data["stars"].empty else 0
+    st.metric("⭐ Total Stars", f"{total_stars:,}")
+
+with col2:
+    total_forks = int(filtered_data["forks"]["count"].sum()) if not filtered_data["forks"].empty else 0
+    st.metric("🍴 Total Forks", f"{total_forks:,}")
+
+with col3:
+    total_prs = int(filtered_data["prs"]["count"].sum()) if not filtered_data["prs"].empty else 0
+    st.metric("🔄 Total PRs", f"{total_prs:,}")
+
+with col4:
+    total_downloads = int(filtered_data["downloads"]["count"].sum()) if not filtered_data["downloads"].empty else 0
+    st.metric("⬇️ Total Downloads", f"{total_downloads:,}")
+
+# ----------------------------
+# CHARTS SECTION
+# ----------------------------
+st.markdown("---")
+st.subheader("📈 Trends Over Time")
+
+def create_line_chart(df, x_col, y_col, title, color, y_label=None):
+    """Create a standardized line chart."""
+    if df.empty:
+        return None
+    fig = px.line(
+        df,
+        x=x_col,
+        y=y_col,
+        title=title,
+        markers=True,
+        template="plotly_white",
+        color_discrete_sequence=[color],
+        labels={y_col: y_label or y_col.replace('_', ' ').title()}
+    )
+    fig.update_layout(xaxis_title="Date", hovermode='x unified')
+    return fig
+
+
+# Stars and Forks
+col1, col2 = st.columns(2)
+with col1:
+    fig_stars = create_line_chart(filtered_data["stars"], "date", "count", "⭐ Stars Over Time", "#FFD700", "Stars")
+    if fig_stars:
         st.plotly_chart(fig_stars, use_container_width=True)
-
-    with col2:
-        fig_forks = px.line(
-            filtered_forks,
-            x="date",
-            y="forks",
-            title=" Forks Over Time",
-            markers=True,
-            template="plotly_white",
-            color_discrete_sequence=["#1f77b4"],
-        )
+with col2:
+    fig_forks = create_line_chart(filtered_data["forks"], "date", "count", "🍴 Forks Over Time", "#1f77b4", "Forks")
+    if fig_forks:
         st.plotly_chart(fig_forks, use_container_width=True)
 
-    # Charts Row 2
-    col3, col4 = st.columns(2)
-    with col3:
-        fig_prs = px.line(
-            filtered_prs,
-            x="date",
-            y="pr_count",
-            title=" Pull Requests Over Time",
-            markers=True,
-            template="plotly_white",
-            color_discrete_sequence=["#FF7F0E"],
-        )
+# PRs and Downloads
+col3, col4 = st.columns(2)
+with col3:
+    fig_prs = create_line_chart(filtered_data["prs"], "date", "count", "🔄 Pull Requests Over Time", "#FF7F0E", "Pull Requests")
+    if fig_prs:
         st.plotly_chart(fig_prs, use_container_width=True)
-
-    with col4:
-        fig_downloads = px.line(
-            filtered_downloads,
-            x="date",
-            y="downloads",
-            title=" Downloads Over Time",
-            markers=True,
-            template="plotly_white",
-            color_discrete_sequence=["#9467bd"],
-        )
+with col4:
+    fig_downloads = create_line_chart(filtered_data["downloads"], "date", "count", "⬇️ Downloads Over Time", "#9467bd", "Downloads")
+    if fig_downloads:
         st.plotly_chart(fig_downloads, use_container_width=True)
 
-    # Contributions Chart
-    if not contributions_df.empty:
-        filtered_contributions = contributions_df[
-            (contributions_df["week"] >= from_date)
-            & (contributions_df["week"] <= to_date)
-        ]
-        if not filtered_contributions.empty:
-            contrib_fig = px.line(
-                filtered_contributions,
-                x="week",
-                y="commits",
-                title=" Weekly Contributions (Commits)",
-                markers=True,
-                template="plotly_white",
-                color_discrete_sequence=["#2ca02c"],
-            )
+# ----------------------------
+# REAL-TIME DATA CHARTS
+# ----------------------------
+st.markdown("---")
+st.subheader("🔄 Real-time Activity")
+
+# Contributions
+contributions_df = real_time_data.get('contributions', pd.DataFrame())
+if not contributions_df.empty:
+    contributions_df = ensure_datetime_column(contributions_df, "week")
+    filtered_contributions = filter_by_date_range(contributions_df, start_date, end_date, "week")
+    if not filtered_contributions.empty:
+        contrib_fig = create_line_chart(filtered_contributions, "week", "commits", "💻 Weekly Contributions (Commits)", "#2ca02c", "Commits")
+        if contrib_fig:
             st.plotly_chart(contrib_fig, use_container_width=True)
-        else:
-            st.info("ℹ️ No contribution data found in selected range.")
     else:
-        st.info("ℹ️ No contribution data found.")
-
-    # Issues Chart
-    if not issues_df.empty:
-        filtered_issues = issues_df[
-            (issues_df["date"] >= from_date) & (issues_df["date"] <= to_date)
-        ]
-        if not filtered_issues.empty:
-            issues_fig = px.line(
-                filtered_issues,
-                x="date",
-                y="issue_count",
-                title=" Issues Over Time",
-                markers=True,
-                template="plotly_white",
-                color_discrete_sequence=["#d62728"],
-            )
-            st.plotly_chart(issues_fig, use_container_width=True)
-        else:
-            st.info("ℹ️ No issues data found in selected range.")
-    else:
-        st.info("ℹ️ No issues data found.")
-
-    # Download Buttons
-    st.markdown("###  Download Filtered Data")
-    d1, d2, d3, d4 = st.columns(4)
-    d1.download_button(
-        "⬇️ Stars CSV",
-        filtered_stars.to_csv(index=False),
-        file_name="filtered_stars.csv",
-    )
-    d2.download_button(
-        "⬇️ Forks CSV",
-        filtered_forks.to_csv(index=False),
-        file_name="filtered_forks.csv",
-    )
-    d3.download_button(
-        "⬇️ PRs CSV",
-        filtered_prs.to_csv(index=False),
-        file_name="filtered_prs.csv",
-    )
-    d4.download_button(
-        "⬇️ Downloads CSV",
-        filtered_downloads.to_csv(index=False),
-        file_name="filtered_downloads.csv",
-    )
-
+        st.info("ℹ️ No contribution data found in selected date range.")
 else:
-    st.error(" One or more input CSV files are missing, empty, or invalid.")
+    st.info("ℹ️ No contribution data available.")
+
+# Issues
+issues_df = real_time_data.get('issues', pd.DataFrame())
+if not issues_df.empty:
+    issues_df = ensure_datetime_column(issues_df)
+    filtered_issues = filter_by_date_range(issues_df, start_date, end_date)
+    if not filtered_issues.empty:
+        issues_fig = create_line_chart(filtered_issues, "date", "issue_count", "🐛 Issues Over Time", "#d62728", "Issues")
+        if issues_fig:
+            st.plotly_chart(issues_fig, use_container_width=True)
+    else:
+        st.info("ℹ️ No issues data found in selected date range.")
+else:
+    st.info("ℹ️ No issues data available.")
 
 # ----------------------------
 # DEPENDENTS SECTION
 # ----------------------------
-st.markdown("## 🔗 Public GitHub Dependents")
-dependents_df = github_fetcher.get_dependents(owner, repo)
+st.markdown("---")
+st.subheader("🔗 Public GitHub Dependents")
 
+dependents_df = real_time_data.get('dependents', pd.DataFrame())
 if not dependents_df.empty:
     df_sorted = dependents_df.sort_values(by="stars", ascending=False)
-
-    counts = {
+    star_ranges = {
         "Below 100 stars": (df_sorted["stars"] < 100).sum(),
-        "100 to 1000 stars": (
-            (df_sorted["stars"] >= 100) & (df_sorted["stars"] <= 1000)
-        ).sum(),
+        "100 to 1000 stars": ((df_sorted["stars"] >= 100) & (df_sorted["stars"] <= 1000)).sum(),
         "1000+ stars": (df_sorted["stars"] > 1000).sum(),
     }
-
-    final_df = pd.DataFrame(
-        list(counts.items()), columns=["Star Range", "Library Count"]
-    )
     st.dataframe(df_sorted, use_container_width=True)
-    fig_dep = px.bar(
-        final_df,
-        x="Star Range",
-        y="Library Count",
-        title="Dependents by Star Range",
-        template="plotly_white",
-    )
-    st.plotly_chart(fig_dep, use_container_width=True)
+    if any(star_ranges.values()):
+        star_range_df = pd.DataFrame(list(star_ranges.items()), columns=["Star Range", "Library Count"])
+        fig_dep = px.bar(star_range_df, x="Star Range", y="Library Count", title="📊 Dependents by Star Range", template="plotly_white", color_discrete_sequence=["#17becf"])
+        st.plotly_chart(fig_dep, use_container_width=True)
 else:
     st.info("ℹ️ No public dependents found.")
+
+# ----------------------------
+# DATA EXPORT SECTION
+# ----------------------------
+st.markdown("---")
+st.subheader("📥 Download Filtered Data")
+
+download_cols = st.columns(4)
+download_data = [
+    ("⬇️ Stars CSV", "filtered_stars.csv", filtered_data["stars"]),
+    ("⬇️ Forks CSV", "filtered_forks.csv", filtered_data["forks"]),
+    ("⬇️ PRs CSV", "filtered_prs.csv", filtered_data["prs"]),
+    ("⬇️ Downloads CSV", "filtered_downloads.csv", filtered_data["downloads"]),
+]
+
+for i, (button_text, filename, df) in enumerate(download_data):
+    with download_cols[i]:
+        if not df.empty:
+            st.download_button(button_text, df.to_csv(index=False), file_name=filename, mime="text/csv")
+        else:
+            st.button(button_text, disabled=True)
+
+# ----------------------------
+# FOOTER
+# ----------------------------
+st.markdown("---")
+st.caption(f"Last updated: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')} | Repository: {owner}/{repo}")
 
 # ----------------------------
 # HIDE STREAMLIT DEFAULT UI
@@ -296,8 +330,5 @@ else:
 hide_st_style = """
     <style>
     #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
     </style>
-"""
-st.markdown(hide_st_style, unsafe_allow_html=True)
+    """
