@@ -149,6 +149,7 @@ with st.spinner("Loading data..."):
     # Load real-time data (contributions, issues, dependents)
     real_time_data = load_real_time_data(owner, repo)
 
+
 # ----------------------------
 # DATA VALIDATION AND FILTERING
 # ----------------------------
@@ -160,6 +161,7 @@ if missing_data:
     st.info("💡 Try clicking 'Force Refresh All Data' to fetch new data.")
     st.stop()
 
+
 # Filter data by date range
 filtered_data = {}
 for key, df in cached_data.items():
@@ -167,6 +169,7 @@ for key, df in cached_data.items():
         filtered_data[key] = filter_by_date_range(df, start_date, end_date)
     else:
         filtered_data[key] = pd.DataFrame()
+
 
 # ----------------------------
 # SUMMARY METRICS
@@ -177,19 +180,19 @@ st.caption(f"Data from {start_date} to {end_date}")
 col1, col2, col3, col4 = st.columns(4)
 
 with col1:
-    total_stars = int(filtered_data["stars"]["stars"].sum()) if not filtered_data["stars"].empty else 0
+    total_stars = int(filtered_data["stars"]["count"].sum()) if not filtered_data["stars"].empty else 0
     st.metric("⭐ Total Stars", f"{total_stars:,}")
 
 with col2:
-    total_forks = int(filtered_data["forks"]["forks"].sum()) if not filtered_data["forks"].empty else 0
+    total_forks = int(filtered_data["forks"]["count"].sum()) if not filtered_data["forks"].empty else 0
     st.metric("🍴 Total Forks", f"{total_forks:,}")
 
 with col3:
-    total_prs = int(filtered_data["prs"]["pr_count"].sum()) if not filtered_data["prs"].empty else 0
+    total_prs = int(filtered_data["prs"]["count"].sum()) if not filtered_data["prs"].empty else 0
     st.metric("🔄 Total PRs", f"{total_prs:,}")
 
 with col4:
-    total_downloads = int(filtered_data["downloads"]["downloads"].sum()) if not filtered_data["downloads"].empty else 0
+    total_downloads = int(filtered_data["downloads"]["count"].sum()) if not filtered_data["downloads"].empty else 0
     st.metric("⬇️ Total Downloads", f"{total_downloads:,}")
 
 # ----------------------------
@@ -215,25 +218,26 @@ def create_line_chart(df, x_col, y_col, title, color, y_label=None):
     fig.update_layout(xaxis_title="Date", hovermode='x unified')
     return fig
 
+
 # Stars and Forks
 col1, col2 = st.columns(2)
 with col1:
-    fig_stars = create_line_chart(filtered_data["stars"], "date", "stars", "⭐ Stars Over Time", "#FFD700", "Stars")
+    fig_stars = create_line_chart(filtered_data["stars"], "date", "count", "⭐ Stars Over Time", "#FFD700", "Stars")
     if fig_stars:
         st.plotly_chart(fig_stars, use_container_width=True)
 with col2:
-    fig_forks = create_line_chart(filtered_data["forks"], "date", "forks", "🍴 Forks Over Time", "#1f77b4", "Forks")
+    fig_forks = create_line_chart(filtered_data["forks"], "date", "count", "🍴 Forks Over Time", "#1f77b4", "Forks")
     if fig_forks:
         st.plotly_chart(fig_forks, use_container_width=True)
 
 # PRs and Downloads
 col3, col4 = st.columns(2)
 with col3:
-    fig_prs = create_line_chart(filtered_data["prs"], "date", "pr_count", "🔄 Pull Requests Over Time", "#FF7F0E", "Pull Requests")
+    fig_prs = create_line_chart(filtered_data["prs"], "date", "count", "🔄 Pull Requests Over Time", "#FF7F0E", "Pull Requests")
     if fig_prs:
         st.plotly_chart(fig_prs, use_container_width=True)
 with col4:
-    fig_downloads = create_line_chart(filtered_data["downloads"], "date", "downloads", "⬇️ Downloads Over Time", "#9467bd", "Downloads")
+    fig_downloads = create_line_chart(filtered_data["downloads"], "date", "count", "⬇️ Downloads Over Time", "#9467bd", "Downloads")
     if fig_downloads:
         st.plotly_chart(fig_downloads, use_container_width=True)
 
@@ -326,3 +330,5 @@ st.caption(f"Last updated: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')} | 
 hide_st_style = """
     <style>
     #MainMenu {visibility: hidden;}
+    </style>
+    """
