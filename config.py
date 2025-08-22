@@ -30,13 +30,10 @@ LOGGING_CONFIG = {
     'log_file': 'github_analytics.log'
 }
 
-# Repository Mapping
+# Repository Mapping (limit to Skrub and Scikit-learn only)
 REPO_MAP = {
     "Skrub": ("skrub-data", "skrub"),
-    "tslearn": ("tslearn-team", "tslearn"),
     "scikit-learn": ("scikit-learn", "scikit-learn"),
-    "Aeon": ("aeon-toolkit", "aeon"),
-    "Mapie": ("scikit-learn-contrib", "mapie"),
 }
 
 # Data Types Configuration

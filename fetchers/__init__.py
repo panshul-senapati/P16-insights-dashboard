@@ -1,8 +1,3 @@
-# fetchers/__init__.py
+# Lightweight package init without importing submodules to avoid circular imports
 
-from .github_fetcher import GitHubFetcher, StarsFetcher
-
-__all__ = [
-    "GitHubFetcher",
-    "StarsFetcher",
-]
+__all__ = []

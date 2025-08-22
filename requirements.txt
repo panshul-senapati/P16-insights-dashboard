@@ -9,6 +9,8 @@ plotly>=5.15.0
 
 # Data processing
 python-dateutil>=2.8.0
+polars>=1.5.0
+skrub>=0.2.0
 
 # Optional: For enhanced GitHub API access
 PyGithub>=1.59.0
