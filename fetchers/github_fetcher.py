@@ -7,9 +7,10 @@ import os
 import time
 import logging
 import requests
-import pandas as pd
-from datetime import datetime
-from typing import Optional, Dict
+import polars as pl
+from .cleaning import clean_polars_df
+from datetime import datetime, timezone
+from typing import Optional, Dict, List
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -40,8 +41,17 @@ class BaseFetcher:
 
             # Rate limit handling
             if response.status_code == 403 and "rate limit" in response.text.lower():
-                logger.warning("Rate limit exceeded. Waiting 60 seconds...")
-                time.sleep(60)
+                reset_ts = response.headers.get("X-RateLimit-Reset")
+                wait_seconds = 60
+                if reset_ts:
+                    try:
+                        reset_time = int(reset_ts)
+                        now = int(time.time())
+                        wait_seconds = max(1, reset_time - now + 2)
+                    except Exception:
+                        wait_seconds = 60
+                logger.warning(f"Rate limit exceeded. Waiting {wait_seconds} seconds...")
+                time.sleep(wait_seconds)
                 response = requests.get(url, headers=headers, params=params, timeout=30)
 
             if response.status_code == 200:
@@ -59,81 +69,198 @@ class BaseFetcher:
 class StarsFetcher(BaseFetcher):
     """Fetch stars over time."""
 
-    def fetch(self, owner: str, repo: str) -> pd.DataFrame:
+    def fetch(self, owner: str, repo: str, since_date: Optional[datetime] = None) -> pl.DataFrame:
         url = f"https://api.github.com/repos/{owner}/{repo}/stargazers"
         headers = self._get_github_headers()
-        headers["Accept"] = "application/vnd.github.v3.star+json"  # To get starred_at
-        response = requests.get(url, headers=headers, params={"per_page": 100})
-        if not response or response.status_code != 200:
-            return pd.DataFrame()
+        headers["Accept"] = "application/vnd.github.v3.star+json"
 
-        data = response.json()
-        # Build DataFrame with date and count
-        df = pd.DataFrame([{"date": star.get("starred_at", datetime.utcnow()), "count": 1} for star in data])
-        if not df.empty:
-            df["date"] = pd.to_datetime(df["date"])
-            df = df.groupby("date").count().reset_index()
-            df.to_csv(os.path.join(self.data_dir, f"{repo}_stars.csv"), index=False)
-            logger.info(f"Saved stars data → {self.data_dir}/{repo}_stars.csv")
+        page = 1
+        all_rows: List[Dict] = []
+        stop = False
+        while not stop:
+            response = requests.get(url, headers=headers, params={"per_page": 100, "page": page}, timeout=30)
+            if not response or response.status_code != 200:
+                break
+            data = response.json()
+            if not data:
+                break
+            for star in data:
+                starred_at = star.get("starred_at")
+                if not starred_at:
+                    starred_at = datetime.utcnow().replace(tzinfo=timezone.utc).isoformat()
+                dt = datetime.fromisoformat(starred_at.replace("Z", "+00:00"))
+                # Normalize to naive before comparison to avoid offset-aware vs naive errors
+                sd = since_date.replace(tzinfo=None) if (since_date and since_date.tzinfo) else since_date
+                if sd and dt.replace(tzinfo=None) <= sd:
+                    stop = True
+                    break
+                all_rows.append({"date": starred_at, "count": 1})
+            page += 1
+            # Respect secondary rate limit via remaining header
+            remaining = response.headers.get("X-RateLimit-Remaining")
+            if remaining is not None and remaining == "0":
+                reset_ts = response.headers.get("X-RateLimit-Reset")
+                wait_seconds = 60
+                if reset_ts:
+                    try:
+                        reset_time = int(reset_ts)
+                        now = int(time.time())
+                        wait_seconds = max(1, reset_time - now + 2)
+                    except Exception:
+                        wait_seconds = 60
+                logger.warning(f"Rate limit remaining 0. Sleeping {wait_seconds}s")
+                time.sleep(wait_seconds)
+
+        if not all_rows:
+            return pl.DataFrame({"date": [], "count": []})
+
+        df = pl.DataFrame(all_rows).with_columns([
+            pl.col("date").str.strptime(pl.Datetime, strict=False).dt.date().alias("date")
+        ]).group_by("date").agg(pl.len().alias("count")).sort("date")
+        df = clean_polars_df(df)
+
         return df
 
 
 class ForksFetcher(BaseFetcher):
     """Fetch forks over time."""
 
-    def fetch(self, owner: str, repo: str) -> pd.DataFrame:
+    def fetch(self, owner: str, repo: str, since_date: Optional[datetime] = None) -> pl.DataFrame:
         url = f"https://api.github.com/repos/{owner}/{repo}/forks"
-        response = self._make_request(url, params={"per_page": 100})
-        if not response:
-            return pd.DataFrame()
-        data = response.json()
-        df = pd.DataFrame([{"date": fork.get("created_at", datetime.utcnow()), "count": 1} for fork in data])
-        if not df.empty:
-            df["date"] = pd.to_datetime(df["date"])
-            df = df.groupby("date").count().reset_index()
-            df.to_csv(os.path.join(self.data_dir, f"{repo}_forks.csv"), index=False)
-            logger.info(f"Saved forks data → {self.data_dir}/{repo}_forks.csv")
+        page = 1
+        all_rows: List[Dict] = []
+        stop = False
+        while not stop:
+            response = self._make_request(url, params={"per_page": 100, "page": page, "sort": "newest"})
+            if not response:
+                break
+            data = response.json()
+            if not data:
+                break
+            for fork in data:
+                created_at = fork.get("created_at", datetime.utcnow().replace(tzinfo=timezone.utc).isoformat())
+                dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                sd = since_date.replace(tzinfo=None) if (since_date and since_date.tzinfo) else since_date
+                if sd and dt.replace(tzinfo=None) <= sd:
+                    stop = True
+                    break
+                all_rows.append({"date": created_at, "count": 1})
+            page += 1
+            if response.headers.get("X-RateLimit-Remaining") == "0":
+                reset_ts = response.headers.get("X-RateLimit-Reset")
+                wait_seconds = 60
+                if reset_ts:
+                    try:
+                        reset_time = int(reset_ts)
+                        now = int(time.time())
+                        wait_seconds = max(1, reset_time - now + 2)
+                    except Exception:
+                        wait_seconds = 60
+                logger.warning(f"Rate limit remaining 0. Sleeping {wait_seconds}s")
+                time.sleep(wait_seconds)
+
+        if not all_rows:
+            return pl.DataFrame({"date": [], "count": []})
+
+        df = pl.DataFrame(all_rows).with_columns([
+            pl.col("date").str.strptime(pl.Datetime, strict=False).dt.date().alias("date")
+        ]).group_by("date").agg(pl.len().alias("count")).sort("date")
+        df = clean_polars_df(df)
         return df
 
 
 class PRsFetcher(BaseFetcher):
     """Fetch pull requests over time."""
 
-    def fetch(self, owner: str, repo: str) -> pd.DataFrame:
+    def fetch(self, owner: str, repo: str, since_date: Optional[datetime] = None) -> pl.DataFrame:
         url = f"https://api.github.com/repos/{owner}/{repo}/pulls"
-        response = self._make_request(url, params={"state": "all", "per_page": 100})
-        if not response:
-            return pd.DataFrame()
-        data = response.json()
-        df = pd.DataFrame([{"date": pr.get("created_at", datetime.utcnow()), "count": 1} for pr in data])
-        if not df.empty:
-            df["date"] = pd.to_datetime(df["date"])
-            df = df.groupby("date").count().reset_index()
-            df.to_csv(os.path.join(self.data_dir, f"{repo}_prs.csv"), index=False)
-            logger.info(f"Saved PRs data → {self.data_dir}/{repo}_prs.csv")
+        page = 1
+        all_rows: List[Dict] = []
+        stop = False
+        while not stop:
+            response = self._make_request(url, params={"state": "all", "per_page": 100, "page": page, "sort": "created", "direction": "desc"})
+            if not response:
+                break
+            data = response.json()
+            if not data:
+                break
+            for pr in data:
+                created_at = pr.get("created_at", datetime.utcnow().replace(tzinfo=timezone.utc).isoformat())
+                dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                sd = since_date.replace(tzinfo=None) if (since_date and since_date.tzinfo) else since_date
+                if sd and dt.replace(tzinfo=None) <= sd:
+                    stop = True
+                    break
+                all_rows.append({"date": created_at, "count": 1})
+            page += 1
+            if response.headers.get("X-RateLimit-Remaining") == "0":
+                reset_ts = response.headers.get("X-RateLimit-Reset")
+                wait_seconds = 60
+                if reset_ts:
+                    try:
+                        reset_time = int(reset_ts)
+                        now = int(time.time())
+                        wait_seconds = max(1, reset_time - now + 2)
+                    except Exception:
+                        wait_seconds = 60
+                logger.warning(f"Rate limit remaining 0. Sleeping {wait_seconds}s")
+                time.sleep(wait_seconds)
+
+        if not all_rows:
+            return pl.DataFrame({"date": [], "count": []})
+
+        df = pl.DataFrame(all_rows).with_columns([
+            pl.col("date").str.strptime(pl.Datetime, strict=False).dt.date().alias("date")
+        ]).group_by("date").agg(pl.len().alias("count")).sort("date")
+        df = clean_polars_df(df)
         return df
 
 
 class DownloadsFetcher(BaseFetcher):
     """Fetch release download counts."""
 
-    def fetch(self, owner: str, repo: str) -> pd.DataFrame:
+    def fetch(self, owner: str, repo: str, since_date: Optional[datetime] = None) -> pl.DataFrame:
         url = f"https://api.github.com/repos/{owner}/{repo}/releases"
-        response = self._make_request(url, params={"per_page": 100})
-        if not response:
-            return pd.DataFrame()
-        data = response.json()
-        rows = []
-        for release in data:
-            date = release.get("published_at", datetime.utcnow())
-            assets = release.get("assets", [])
-            count = sum(asset.get("download_count", 0) for asset in assets)
-            rows.append({"date": date, "count": count})
-        df = pd.DataFrame(rows)
-        if not df.empty:
-            df["date"] = pd.to_datetime(df["date"])
-            df.to_csv(os.path.join(self.data_dir, f"{repo}_downloads.csv"), index=False)
-            logger.info(f"Saved downloads data → {self.data_dir}/{repo}_downloads.csv")
+        page = 1
+        rows: List[Dict] = []
+        stop = False
+        while not stop:
+            response = self._make_request(url, params={"per_page": 100, "page": page})
+            if not response:
+                break
+            data = response.json()
+            if not data:
+                break
+            for release in data:
+                date_val = release.get("published_at", datetime.utcnow().replace(tzinfo=timezone.utc).isoformat())
+                dt = datetime.fromisoformat(date_val.replace("Z", "+00:00"))
+                sd = since_date.replace(tzinfo=None) if (since_date and since_date.tzinfo) else since_date
+                if sd and dt.replace(tzinfo=None) <= sd:
+                    stop = True
+                    break
+                assets = release.get("assets", [])
+                count = sum(asset.get("download_count", 0) for asset in assets)
+                rows.append({"date": date_val, "count": count})
+            page += 1
+            if response.headers.get("X-RateLimit-Remaining") == "0":
+                reset_ts = response.headers.get("X-RateLimit-Reset")
+                wait_seconds = 60
+                if reset_ts:
+                    try:
+                        reset_time = int(reset_ts)
+                        now = int(time.time())
+                        wait_seconds = max(1, reset_time - now + 2)
+                    except Exception:
+                        wait_seconds = 60
+                logger.warning(f"Rate limit remaining 0. Sleeping {wait_seconds}s")
+                time.sleep(wait_seconds)
+        if not rows:
+            return pl.DataFrame({"date": [], "count": []})
+
+        df = pl.DataFrame(rows).with_columns([
+            pl.col("date").str.strptime(pl.Datetime, strict=False).dt.date().alias("date")
+        ]).group_by("date").agg(pl.col("count").sum()).sort("date")
+        df = clean_polars_df(df)
         return df
 
 
@@ -148,7 +275,7 @@ class GitHubFetcher:
         self.prs_fetcher = PRsFetcher(data_dir)
         self.downloads_fetcher = DownloadsFetcher(data_dir)
 
-    def fetch_all(self, owner: str, repo: str) -> Dict[str, pd.DataFrame]:
+    def fetch_all(self, owner: str, repo: str) -> Dict[str, pl.DataFrame]:
         """Fetch all metrics and return as dict of DataFrames."""
         data = {}
         data["stars"] = self.stars_fetcher.fetch(owner, repo)
@@ -156,3 +283,18 @@ class GitHubFetcher:
         data["prs"] = self.prs_fetcher.fetch(owner, repo)
         data["downloads"] = self.downloads_fetcher.fetch(owner, repo)
         return data
+
+    def get_repo_created_at(self, owner: str, repo: str) -> Optional[datetime]:
+        """Fetch repository metadata and return created_at as datetime (UTC)."""
+        url = f"https://api.github.com/repos/{owner}/{repo}"
+        response = self.stars_fetcher._make_request(url)
+        if not response:
+            return None
+        try:
+            info = response.json()
+            created_at = info.get("created_at")
+            if not created_at:
+                return None
+            return datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        except Exception:
+            return None

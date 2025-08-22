@@ -21,9 +21,11 @@ if not token:
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 from datetime import date, timedelta
 
 from data_manager import DataManager
+from config import REPO_MAP as CONFIG_REPO_MAP
 
 # ----------------------------
 # PAGE CONFIGURATION
@@ -36,14 +38,8 @@ st.title("📊 GitHub Insights Dashboard")
 # ----------------------------
 st.sidebar.header("📁 Library Info & Filter")
 
-# Repository mapping
-REPO_MAP = {
-    "Skrub": ("skrub-data", "skrub"),
-    "tslearn": ("tslearn-team", "tslearn"),
-    "scikit-learn": ("scikit-learn", "scikit-learn"),
-    "Aeon": ("aeon-toolkit", "aeon"),
-    "Mapie": ("scikit-learn-contrib", "mapie"),
-}
+# Repository mapping (Skrub and Scikit-learn)
+REPO_MAP = CONFIG_REPO_MAP
 
 # Library selection
 selected_lib = st.sidebar.selectbox("🔍 Select Library:", list(REPO_MAP.keys()))
@@ -55,8 +51,8 @@ default_start = today - timedelta(days=180)
 
 start_date = st.sidebar.date_input(
     "📅 Select Start Date:", 
-    default_start, 
-    min_value=date(2010, 1, 1), 
+    default_start,
+    min_value=date(2011, 1, 1),
     max_value=today
 )
 end_date = st.sidebar.date_input(
@@ -100,12 +96,12 @@ if st.session_state.get('show_status', False):
 # ----------------------------
 @st.cache_data(ttl=3600)  # Cache for 1 hour
 def load_cached_data(owner: str, repo: str, force_refresh: bool = False):
-    """Load all cached data through data manager."""
+    """Load all cached data (Polars) through data manager. On first run, force full backfill."""
     return data_manager.get_all_cached_data(owner, repo, force_refresh)
 
 @st.cache_data(ttl=1800)  # Cache for 30 minutes
 def load_real_time_data(owner: str, repo: str):
-    """Load real-time data through data manager."""
+    """Load real-time data through data manager (Polars)."""
     return data_manager.get_real_time_data(owner, repo)
 
 def ensure_datetime_column(df: pd.DataFrame, date_col: str = "date") -> pd.DataFrame:
@@ -139,22 +135,18 @@ def filter_by_date_range(df: pd.DataFrame, start_date: date, end_date: date, dat
 # MAIN DATA LOADING
 # ----------------------------
 with st.spinner("Loading data..."):
-    # Load cached data (stars, forks, PRs, downloads)
-    cached_data = load_cached_data(owner, repo, force_refresh)
-    
-    # Ensure datetime columns
-    for key, df in cached_data.items():
-        cached_data[key] = ensure_datetime_column(df)
-    
-    # Load real-time data (contributions, issues, dependents)
-    real_time_data = load_real_time_data(owner, repo)
+    # Ensure full history exists on first run
+    ranged_pl = data_manager.get_range_data(owner, repo, start_date, end_date, force_refresh=False)
+    cached_pl = ranged_pl
+    # Load real-time data (Polars)
+    real_time_pl = load_real_time_data(owner, repo)
 
 
 # ----------------------------
 # DATA VALIDATION AND FILTERING
 # ----------------------------
 required_data = ['stars', 'forks', 'prs', 'downloads']
-missing_data = [key for key in required_data if cached_data[key].empty]
+missing_data = [key for key in required_data if (cached_pl.get(key) is None or len(cached_pl.get(key)) == 0)]
 
 if missing_data:
     st.error(f"❌ Missing or invalid data for: {', '.join(missing_data)}")
@@ -164,11 +156,11 @@ if missing_data:
 
 # Filter data by date range
 filtered_data = {}
-for key, df in cached_data.items():
-    if not df.empty:
-        filtered_data[key] = filter_by_date_range(df, start_date, end_date)
+for key, dfpl in cached_pl.items():
+    if dfpl is not None and len(dfpl) > 0:
+        filtered_data[key] = dfpl
     else:
-        filtered_data[key] = pd.DataFrame()
+        filtered_data[key] = None
 
 
 # ----------------------------
@@ -180,19 +172,19 @@ st.caption(f"Data from {start_date} to {end_date}")
 col1, col2, col3, col4 = st.columns(4)
 
 with col1:
-    total_stars = int(filtered_data["stars"]["count"].sum()) if not filtered_data["stars"].empty else 0
+    total_stars = int(filtered_data["stars"]["count"].sum()) if filtered_data["stars"] is not None and len(filtered_data["stars"]) else 0
     st.metric("⭐ Total Stars", f"{total_stars:,}")
 
 with col2:
-    total_forks = int(filtered_data["forks"]["count"].sum()) if not filtered_data["forks"].empty else 0
+    total_forks = int(filtered_data["forks"]["count"].sum()) if filtered_data["forks"] is not None and len(filtered_data["forks"]) else 0
     st.metric("🍴 Total Forks", f"{total_forks:,}")
 
 with col3:
-    total_prs = int(filtered_data["prs"]["count"].sum()) if not filtered_data["prs"].empty else 0
+    total_prs = int(filtered_data["prs"]["count"].sum()) if filtered_data["prs"] is not None and len(filtered_data["prs"]) else 0
     st.metric("🔄 Total PRs", f"{total_prs:,}")
 
 with col4:
-    total_downloads = int(filtered_data["downloads"]["count"].sum()) if not filtered_data["downloads"].empty else 0
+    total_downloads = int(filtered_data["downloads"]["count"].sum()) if filtered_data["downloads"] is not None and len(filtered_data["downloads"]) else 0
     st.metric("⬇️ Total Downloads", f"{total_downloads:,}")
 
 # ----------------------------
@@ -201,21 +193,20 @@ with col4:
 st.markdown("---")
 st.subheader("📈 Trends Over Time")
 
-def create_line_chart(df, x_col, y_col, title, color, y_label=None):
+def create_line_chart(dfpl, x_col, y_col, title, color, y_label=None):
     """Create a standardized line chart."""
-    if df.empty:
+    if dfpl is None or len(dfpl) == 0:
         return None
-    fig = px.line(
-        df,
-        x=x_col,
-        y=y_col,
-        title=title,
-        markers=True,
-        template="plotly_white",
-        color_discrete_sequence=[color],
-        labels={y_col: y_label or y_col.replace('_', ' ').title()}
-    )
-    fig.update_layout(xaxis_title="Date", hovermode='x unified')
+    dfpl = dfpl.sort("date")
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=dfpl[x_col].to_list(),
+        y=dfpl[y_col].to_list(),
+        mode="lines+markers",
+        name=y_label or y_col.replace('_', ' ').title(),
+        line=dict(color=color)
+    ))
+    fig.update_layout(title=title, template="plotly_white", xaxis_title="Date", hovermode='x unified')
     return fig
 
 
@@ -248,28 +239,22 @@ st.markdown("---")
 st.subheader("🔄 Real-time Activity")
 
 # Contributions
-contributions_df = real_time_data.get('contributions', pd.DataFrame())
-if not contributions_df.empty:
-    contributions_df = ensure_datetime_column(contributions_df, "week")
-    filtered_contributions = filter_by_date_range(contributions_df, start_date, end_date, "week")
-    if not filtered_contributions.empty:
-        contrib_fig = create_line_chart(filtered_contributions, "week", "commits", "💻 Weekly Contributions (Commits)", "#2ca02c", "Commits")
-        if contrib_fig:
-            st.plotly_chart(contrib_fig, use_container_width=True)
+contributions_pl = real_time_pl.get('contributions')
+if contributions_pl is not None and len(contributions_pl) > 0:
+    contrib_fig = create_line_chart(contributions_pl, "week", "commits", "💻 Weekly Contributions (Commits)", "#2ca02c", "Commits")
+    if contrib_fig:
+        st.plotly_chart(contrib_fig, use_container_width=True)
     else:
         st.info("ℹ️ No contribution data found in selected date range.")
 else:
     st.info("ℹ️ No contribution data available.")
 
 # Issues
-issues_df = real_time_data.get('issues', pd.DataFrame())
-if not issues_df.empty:
-    issues_df = ensure_datetime_column(issues_df)
-    filtered_issues = filter_by_date_range(issues_df, start_date, end_date)
-    if not filtered_issues.empty:
-        issues_fig = create_line_chart(filtered_issues, "date", "issue_count", "🐛 Issues Over Time", "#d62728", "Issues")
-        if issues_fig:
-            st.plotly_chart(issues_fig, use_container_width=True)
+issues_pl = real_time_pl.get('issues')
+if issues_pl is not None and len(issues_pl) > 0:
+    issues_fig = create_line_chart(issues_pl, "date", "issue_count", "🐛 Issues Over Time", "#d62728", "Issues")
+    if issues_fig:
+        st.plotly_chart(issues_fig, use_container_width=True)
     else:
         st.info("ℹ️ No issues data found in selected date range.")
 else:
@@ -281,19 +266,10 @@ else:
 st.markdown("---")
 st.subheader("🔗 Public GitHub Dependents")
 
-dependents_df = real_time_data.get('dependents', pd.DataFrame())
-if not dependents_df.empty:
-    df_sorted = dependents_df.sort_values(by="stars", ascending=False)
-    star_ranges = {
-        "Below 100 stars": (df_sorted["stars"] < 100).sum(),
-        "100 to 1000 stars": ((df_sorted["stars"] >= 100) & (df_sorted["stars"] <= 1000)).sum(),
-        "1000+ stars": (df_sorted["stars"] > 1000).sum(),
-    }
-    st.dataframe(df_sorted, use_container_width=True)
-    if any(star_ranges.values()):
-        star_range_df = pd.DataFrame(list(star_ranges.items()), columns=["Star Range", "Library Count"])
-        fig_dep = px.bar(star_range_df, x="Star Range", y="Library Count", title="📊 Dependents by Star Range", template="plotly_white", color_discrete_sequence=["#17becf"])
-        st.plotly_chart(fig_dep, use_container_width=True)
+dependents_pl = real_time_pl.get('dependents')
+if dependents_pl is not None and len(dependents_pl) > 0:
+    # Convert to table directly from Polars
+    st.dataframe(dependents_pl.sort("stars", descending=True).to_pandas(), use_container_width=True)
 else:
     st.info("ℹ️ No public dependents found.")
 
@@ -303,20 +279,46 @@ else:
 st.markdown("---")
 st.subheader("📥 Download Filtered Data")
 
-download_cols = st.columns(4)
-download_data = [
-    ("⬇️ Stars CSV", "filtered_stars.csv", filtered_data["stars"]),
-    ("⬇️ Forks CSV", "filtered_forks.csv", filtered_data["forks"]),
-    ("⬇️ PRs CSV", "filtered_prs.csv", filtered_data["prs"]),
-    ("⬇️ Downloads CSV", "filtered_downloads.csv", filtered_data["downloads"]),
-]
+import io
+import polars as pl
 
-for i, (button_text, filename, df) in enumerate(download_data):
-    with download_cols[i]:
-        if not df.empty:
-            st.download_button(button_text, df.to_csv(index=False), file_name=filename, mime="text/csv")
-        else:
-            st.button(button_text, disabled=True)
+# Build a single combined CSV for selected dates with all metrics
+metric_frames = {
+    "stars": filtered_data.get("stars"),
+    "forks": filtered_data.get("forks"),
+    "prs": filtered_data.get("prs"),
+    "downloads": filtered_data.get("downloads"),
+}
+
+# Base date frame from selected start/end to avoid duplicate key columns
+base_dates = pl.date_range(start_date, end_date, interval="1d", eager=True).alias("date")
+combined_pl = pl.DataFrame({"date": base_dates})
+
+for name, dfpl in metric_frames.items():
+    if dfpl is None or len(dfpl) == 0:
+        continue
+    # Ensure proper schema and aggregate by date
+    tmp = (
+        dfpl.with_columns(pl.col("date").cast(pl.Date, strict=False))
+            .group_by("date")
+            .agg(pl.col("count").sum().alias(name))
+            .select(["date", name])
+    )
+    combined_pl = combined_pl.join(tmp, on="date", how="left")
+
+# Fill missing metric values with 0 and sort
+fill_cols = [c for c in combined_pl.columns if c != "date"]
+if fill_cols:
+    combined_pl = combined_pl.sort("date").with_columns([pl.col(fill_cols).fill_null(0)])
+
+if len(combined_pl) > 0:
+    buf = io.StringIO()
+    combined_pl.write_csv(buf)
+    csv_data = buf.getvalue()
+    fname = f"{repo}_metrics_{start_date}_{end_date}.csv"
+    st.download_button("⬇️ Download Combined CSV", data=csv_data, file_name=fname, mime="text/csv")
+else:
+    st.info("No data available for the selected date range.")
 
 # ----------------------------
 # FOOTER
