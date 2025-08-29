@@ -1,0 +1,8 @@
+.env
+
+gitty.env
+
+# Environment files
+.env
+*.env
+gitty.env

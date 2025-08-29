@@ -1,0 +1,5 @@
+event_id,date,library,satisfaction,usefulness,comments
+E001,2024-04-01,scikit-learn,4.5,4.7,Great workshop!
+E002,2024-05-10,scikit-learn,4.2,4.4,Learnt a lot!
+E003,2024-03-15,pandas,4.7,4.9,Very informative!
+
